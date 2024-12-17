@@ -74,6 +74,49 @@ function parseShorthandNumber(value) {
 	return parseFloat(value.replace(/[KM]/, '').replace(/,/g, '')) * multiplier
 }
 
+function loadPreviousResults(reportsFolder) {
+	const files = fs
+		.readdirSync(reportsFolder)
+		.filter(
+			(file) => file.startsWith('tiktok_results_') && file.endsWith('.json')
+		)
+		.sort() // Sort alphabetically, which works as they are timestamped
+
+	if (files.length === 0) return null
+
+	const lastFile = files[files.length - 1]
+	const lastFilePath = path.join(reportsFolder, lastFile)
+	console.log(`Comparing data with previous results: ${lastFile}`)
+	return JSON.parse(fs.readFileSync(lastFilePath, 'utf-8'))
+}
+
+function calculateDifferences(currentResults, previousResults) {
+	const differences = {}
+
+	;(currentResults || []).forEach((currentUser) => {
+		const previousUser = (previousResults.results || []).find(
+			(user) => user.username === currentUser.username
+		)
+
+		if (previousUser) {
+			differences[currentUser.username] = {
+				followersChange: currentUser.followers - (previousUser.followers || 0),
+				likesChange: currentUser.likes - (previousUser.likes || 0),
+				totalViewsChange: currentUser.totalViews - (previousUser.totalViews || 0),
+			}
+		} else {
+			// If no previous data, consider all values as new
+			differences[currentUser.username] = {
+				followersChange: currentUser.followers,
+				likesChange: currentUser.likes,
+				totalViewsChange: currentUser.totalViews,
+			}
+		}
+	})
+
+	return differences
+}
+
 // Scrape TikTok profile data
 async function scrapeTikTokProfile(username, retries, progressBar) {
 	const url = `https://www.tiktok.com/@${username}`
@@ -172,21 +215,23 @@ function getTopUsers(results, metric, count = 5) {
 		.map((user) => ({ username: user.username, [metric]: user[metric] }))
 }
 
-// Main function
 ;(async () => {
 	const inputFilePath = 'tiktok_users.txt'
 	const configFilePath = 'config.json'
 
 	const { retries, rankLimit } = loadConfig(configFilePath)
 	const usernames = readUsernamesFromFile(inputFilePath)
+	const reportsFolder = ensureReportsFolder()
 
 	if (usernames.length === 0) {
 		console.error('No usernames found. Exiting...')
 		process.exit(1)
 	}
 
-	console.log(`Starting TikTok scraping for ${usernames.length} users...`)
+	// Load previous results if available
+	const previousResults = loadPreviousResults(reportsFolder)
 
+	console.log(`Starting TikTok scraping for ${usernames.length} users...`)
 	const progressBar = new cliProgress.SingleBar(
 		{
 			format:
@@ -205,6 +250,7 @@ function getTopUsers(results, metric, count = 5) {
 
 	progressBar.stop()
 
+	// Totals
 	const totalVideos = results.reduce(
 		(sum, user) => sum + (user.totalVideos || 0),
 		0
@@ -219,6 +265,7 @@ function getTopUsers(results, metric, count = 5) {
 		0
 	)
 
+	// Top Rankings
 	const topUsersByFollowers = getTopUsers(results, 'followers', rankLimit)
 	const topUsersByViews = getTopUsers(results, 'totalViews', rankLimit)
 	const topUsersByLikes = getTopUsers(results, 'likes', rankLimit)
@@ -227,7 +274,12 @@ function getTopUsers(results, metric, count = 5) {
 		.flatMap((user) => user.videos || [])
 		.reduce((max, video) => (video.views > max.views ? video : max), { views: 0 })
 
-	const reportsFolder = ensureReportsFolder()
+	// Compare with previous results
+	const differences = previousResults
+		? calculateDifferences(results, previousResults)
+		: {}
+
+	// Save Results
 	const now = new Date()
 	const timestamp = now.toISOString().replace(/[:.]/g, '-')
 	const outputFilePath = path.join(
@@ -236,7 +288,9 @@ function getTopUsers(results, metric, count = 5) {
 	)
 
 	const outputData = {
+		timestamp: now.toISOString(),
 		results,
+		differences,
 		totals: {
 			totalUsers: usernames.length,
 			totalVideos,
@@ -255,30 +309,35 @@ function getTopUsers(results, metric, count = 5) {
 	fs.writeFileSync(outputFilePath, JSON.stringify(outputData, null, 2))
 	console.log(`Results saved to ${outputFilePath}`)
 
-	// Print summary
-	console.log('\n--- TikTok Takeover Stats ---')
+	// Print Summary
+	console.log('\n--- Loner TikTok Stats ---')
 	console.log(`Total Users: ${usernames.length}`)
 	console.log(`Total Videos: ${totalVideos}`)
 	console.log(`Total Followers: ${totalFollowers}`)
 	console.log(`Total Likes: ${totalLikes}`)
 	console.log(`Total Views: ${totalViews}`)
 
+	// Print Changes
+	if (previousResults) {
+		console.log('\n--- Changes Since Last Run ---')
+		Object.entries(differences).forEach(([username, diff]) => {
+			console.log(
+				`@${username}: Followers: ${diff.followersChange >= 0 ? '+' : ''}${
+					diff.followersChange
+				}, Likes: ${diff.likesChange >= 0 ? '+' : ''}${diff.likesChange}, Views: ${
+					diff.totalViewsChange >= 0 ? '+' : ''
+				}${diff.totalViewsChange}`
+			)
+		})
+
+		const timeSinceLastRun = Math.round(
+			(now - new Date(previousResults.timestamp)) / 1000 / 60
+		)
+		console.log(`\nTime since last run: ${timeSinceLastRun} minutes.`)
+	}
+
 	console.log(`\nTop ${rankLimit} Users by Followers:`)
 	topUsersByFollowers.forEach((user, i) =>
 		console.log(`${i + 1}. @${user.username} - ${user.followers} followers`)
-	)
-
-	console.log(`\nTop ${rankLimit} Users by Views:`)
-	topUsersByViews.forEach((user, i) =>
-		console.log(`${i + 1}. @${user.username} - ${user.totalViews} views`)
-	)
-
-	console.log(`\nTop ${rankLimit} Users by Likes:`)
-	topUsersByLikes.forEach((user, i) =>
-		console.log(`${i + 1}. @${user.username} - ${user.likes} likes`)
-	)
-
-	console.log(
-		`\nVideo with Most Views: ${videoWithMostViews.link} (${videoWithMostViews.views} views)`
 	)
 })()
