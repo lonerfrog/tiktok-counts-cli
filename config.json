@@ -1,3 +1,4 @@
 {
-	"retries": 5
+	"retries": 3,
+	"rankLimit": 5
 }
