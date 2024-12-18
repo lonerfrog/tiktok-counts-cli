@@ -14,7 +14,7 @@ function loadConfig(configPath) {
 		return config
 	} catch (error) {
 		console.error(`Error loading config file: ${error.message}`)
-		return { retries: 3 }
+		return { retries: 3, rankLimit: 5 }
 	}
 }
 
@@ -22,7 +22,6 @@ function loadConfig(configPath) {
 function readUsernamesFromFile(filePath) {
 	try {
 		const data = fs.readFileSync(filePath, 'utf-8')
-		// Split lines, trim spaces, filter blanks, and remove duplicates using a Set
 		const usernames = Array.from(
 			new Set(
 				data
@@ -31,7 +30,6 @@ function readUsernamesFromFile(filePath) {
 					.filter(Boolean)
 			)
 		)
-
 		console.log(`Loaded ${usernames.length} unique usernames.`)
 		return usernames
 	} catch (error) {
@@ -40,38 +38,11 @@ function readUsernamesFromFile(filePath) {
 	}
 }
 
-// Check if TikTok user exists
-async function checkUserExists(page, username) {
-	try {
-		const url = `https://www.tiktok.com/@${username}`
-		await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 })
-		const notFound = await page.$("div[data-e2e='user-not-found']")
-		return !notFound
-	} catch (error) {
-		return false
-	}
-}
-
-// Helper to get top N users based on a metric
-function getTopUsers(results, metric, rankLimit) {
-	return results
-		.filter((user) => !user.error)
-		.sort((a, b) => (b[metric] || 0) - (a[metric] || 0))
-		.slice(0, rankLimit)
-		.map((user) => ({ username: user.username, [metric]: user[metric] }))
-}
-
-// Convert TikTok shorthand like "13K", "12.3K", or "1.5M" to an integer
-function parseShorthandNumber(value) {
-	if (!value) return 0
-
-	const multiplier = value.includes('K')
-		? 1000
-		: value.includes('M')
-		? 1000000
-		: 1
-
-	return parseFloat(value.replace(/[KM]/, '').replace(/,/g, '')) * multiplier
+// Format large numbers into shorthand (e.g., 4.3M, 323K)
+function formatNumber(value) {
+	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+	if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
+	return value.toString()
 }
 
 // Scrape TikTok profile data
@@ -91,23 +62,12 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 		try {
 			progressBar.update({ username: `@${username}` })
 
-			// Check if the user exists
-			const exists = await checkUserExists(page, username)
-			if (!exists) {
-				console.log(`User @${username} does not exist.`)
-				await browser.close()
-				return { username, error: 'User not found' }
-			}
-
-			// Navigate to the user's profile
 			await page.goto(url, { waitUntil: 'networkidle2', timeout: 90000 })
 			await page.waitForSelector('[data-e2e="followers-count"]', {
 				timeout: 20000,
 			})
 
-			// Extract data
-			const data = await page.evaluate((parseShorthandNumber) => {
-				// Helper to parse shorthand numbers
+			const data = await page.evaluate(() => {
 				function parseShorthand(value) {
 					if (!value) return 0
 					const multiplier = value.includes('K')
@@ -118,7 +78,6 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 					return parseFloat(value.replace(/[KM]/, '').replace(/,/g, '')) * multiplier
 				}
 
-				// Followers and likes
 				const followersText =
 					document.querySelector('[data-e2e="followers-count"]')?.textContent || '0'
 				const likesText =
@@ -127,7 +86,6 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 				const followers = parseShorthand(followersText)
 				const likes = parseShorthand(likesText)
 
-				// Extract videos and views
 				const videos = []
 				let totalViews = 0
 				document
@@ -143,7 +101,7 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 					})
 
 				return { followers, likes, totalViews, totalVideos: videos.length, videos }
-			}, parseShorthandNumber.toString())
+			})
 
 			await browser.close()
 			return { username, ...data }
@@ -169,7 +127,10 @@ function getTopUsers(results, metric, count = 5) {
 		.filter((user) => !user.error)
 		.sort((a, b) => (b[metric] || 0) - (a[metric] || 0))
 		.slice(0, count)
-		.map((user) => ({ username: user.username, [metric]: user[metric] }))
+		.map((user) => ({
+			username: user.username,
+			[metric]: formatNumber(user[metric] || 0),
+		}))
 }
 
 // Main function
@@ -205,18 +166,17 @@ function getTopUsers(results, metric, count = 5) {
 
 	progressBar.stop()
 
-	const totalVideos = results.reduce(
-		(sum, user) => sum + (user.totalVideos || 0),
-		0
+	const totalVideos = formatNumber(
+		results.reduce((sum, user) => sum + (user.totalVideos || 0), 0)
 	)
-	const totalFollowers = results.reduce(
-		(sum, user) => sum + (user.followers || 0),
-		0
+	const totalFollowers = formatNumber(
+		results.reduce((sum, user) => sum + (user.followers || 0), 0)
 	)
-	const totalLikes = results.reduce((sum, user) => sum + (user.likes || 0), 0)
-	const totalViews = results.reduce(
-		(sum, user) => sum + (user.totalViews || 0),
-		0
+	const totalLikes = formatNumber(
+		results.reduce((sum, user) => sum + (user.likes || 0), 0)
+	)
+	const totalViews = formatNumber(
+		results.reduce((sum, user) => sum + (user.totalViews || 0), 0)
 	)
 
 	const topUsersByFollowers = getTopUsers(results, 'followers', rankLimit)
@@ -248,7 +208,10 @@ function getTopUsers(results, metric, count = 5) {
 			topUsersByFollowers,
 			topUsersByViews,
 			topUsersByLikes,
-			videoWithMostViews,
+			videoWithMostViews: {
+				...videoWithMostViews,
+				views: formatNumber(videoWithMostViews.views),
+			},
 		},
 	}
 
@@ -265,20 +228,20 @@ function getTopUsers(results, metric, count = 5) {
 
 	console.log(`\nTop ${rankLimit} Users by Followers:`)
 	topUsersByFollowers.forEach((user, i) =>
-		console.log(`${i + 1}. ${user.username} - ${user.followers} followers`)
+		console.log(`${i + 1}. @${user.username} - ${user.followers}`)
 	)
 
 	console.log(`\nTop ${rankLimit} Users by Views:`)
 	topUsersByViews.forEach((user, i) =>
-		console.log(`${i + 1}. ${user.username} - ${user.totalViews} views`)
+		console.log(`${i + 1}. @${user.username} - ${user.totalViews}`)
 	)
 
 	console.log(`\nTop ${rankLimit} Users by Likes:`)
 	topUsersByLikes.forEach((user, i) =>
-		console.log(`${i + 1}. ${user.username} - ${user.likes} likes`)
+		console.log(`${i + 1}. @${user.username} - ${user.likes}`)
 	)
 
 	console.log(
-		`\nVideo with Most Views: ${videoWithMostViews.link} (${videoWithMostViews.views} views)`
+		`\nVideo with Most Views: ${videoWithMostViews.link} (${videoWithMostViews.views})`
 	)
 })()
