@@ -265,17 +265,17 @@ function getTopUsers(results, metric, count = 5) {
 
 	console.log(`\nTop ${rankLimit} Users by Followers:`)
 	topUsersByFollowers.forEach((user, i) =>
-		console.log(`${i + 1}. @${user.username} - ${user.followers} followers`)
+		console.log(`${i + 1}. ${user.username} - ${user.followers} followers`)
 	)
 
 	console.log(`\nTop ${rankLimit} Users by Views:`)
 	topUsersByViews.forEach((user, i) =>
-		console.log(`${i + 1}. @${user.username} - ${user.totalViews} views`)
+		console.log(`${i + 1}. ${user.username} - ${user.totalViews} views`)
 	)
 
 	console.log(`\nTop ${rankLimit} Users by Likes:`)
 	topUsersByLikes.forEach((user, i) =>
-		console.log(`${i + 1}. @${user.username} - ${user.likes} likes`)
+		console.log(`${i + 1}. ${user.username} - ${user.likes} likes`)
 	)
 
 	console.log(
