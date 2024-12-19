@@ -7,55 +7,19 @@ const cliProgress = require('cli-progress')
 // Enable stealth mode to bypass detection
 puppeteer.use(StealthPlugin())
 
-// Load configuration
-function loadConfig(configPath) {
-	try {
-		const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
-		return { ...config, batchSize: config.batchSize || 5 }
-	} catch (error) {
-		console.error(`Error loading config file: ${error.message}`)
-		return { retries: 3, rankLimit: 5, batchSize: 5 }
+// Calculate time difference in human-readable format
+function calculateTimeDifference(current, previous) {
+	// Ensure both arguments are valid Date objects
+	if (!(current instanceof Date) || !(previous instanceof Date)) {
+		return 'Invalid timestamp'
 	}
-}
 
-// Read TikTok usernames from a file
-function readUsernamesFromFile(filePath) {
-	try {
-		const data = fs.readFileSync(filePath, 'utf-8')
-		const usernames = Array.from(
-			new Set(
-				data
-					.split('\n')
-					.map((line) => line.trim())
-					.filter(Boolean)
-			)
-		)
-		console.log(`Loaded ${usernames.length} unique usernames.`)
-		return usernames
-	} catch (error) {
-		console.error(`Error reading usernames file: ${error.message}`)
-		return []
-	}
-}
-
-// Format large numbers into shorthand (e.g., 4.3M, 323K)
-function formatNumber(value) {
-	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
-	if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
-	return value.toString()
-}
-
-// Get the top N users based on a specific metric
-function getTopUsers(results, metric, count = 5) {
-	return results
-		.filter((user) => !user.error)
-		.sort((a, b) => (b[metric] || 0) - (a[metric] || 0))
-		.slice(0, count)
-		.map(
-			(user, index) =>
-				`${index + 1}. @${user.username} - ${formatNumber(user[metric] || 0)}`
-		)
-		.join('\n')
+	const msDifference = current - previous
+	const seconds = Math.floor((msDifference / 1000) % 60)
+	const minutes = Math.floor((msDifference / (1000 * 60)) % 60)
+	const hours = Math.floor((msDifference / (1000 * 60 * 60)) % 24)
+	const days = Math.floor(msDifference / (1000 * 60 * 60 * 24))
+	return `${days}d ${hours}h ${minutes}m ${seconds}s ago`
 }
 
 // Scrape TikTok profile data
@@ -165,6 +129,100 @@ async function processInBatches(usernames, batchSize, task, logFilePath) {
 	return results
 }
 
+// Load configuration
+function loadConfig(configPath) {
+	try {
+		const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
+		return { ...config, batchSize: config.batchSize || 5 }
+	} catch (error) {
+		console.error(`Error loading config file: ${error.message}`)
+		return { retries: 3, rankLimit: 5, batchSize: 5 }
+	}
+}
+
+// Read TikTok usernames from a file
+function readUsernamesFromFile(filePath) {
+	try {
+		const data = fs.readFileSync(filePath, 'utf-8')
+		const usernames = Array.from(
+			new Set(
+				data
+					.split('\n')
+					.map((line) => line.trim())
+					.filter(Boolean)
+			)
+		)
+		console.log(`Loaded ${usernames.length} unique usernames.`)
+		return usernames
+	} catch (error) {
+		console.error(`Error reading usernames file: ${error.message}`)
+		return []
+	}
+}
+
+// Format large numbers into shorthand (e.g., 4.3M, 323K)
+function formatNumber(value) {
+	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+	if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
+	return value.toString()
+}
+
+// Calculate differences for metrics
+function calculateDifferences(current, previous) {
+	return {
+		totalUsers: current.totalUsers - (previous.totalUsers || 0),
+		totalVideos: current.totalVideos - (previous.totalVideos || 0),
+		totalFollowers: current.totalFollowers - (previous.totalFollowers || 0),
+		totalLikes: current.totalLikes - (previous.totalLikes || 0),
+		totalViews: current.totalViews - (previous.totalViews || 0),
+	}
+}
+
+// Get the top N users based on a specific metric
+function getTopUsers(results, metric, count = 5) {
+	return results
+		.filter((user) => !user.error)
+		.sort((a, b) => (b[metric] || 0) - (a[metric] || 0))
+		.slice(0, count)
+		.map(
+			(user, index) =>
+				`${index + 1}. ${user.username} - ${formatNumber(user[metric] || 0)}`
+		)
+		.join('\n')
+}
+
+// Load the most recent report
+function loadLastReport(reportsFolder) {
+	const reportFiles = fs
+		.readdirSync(reportsFolder)
+		.filter(
+			(file) => file.startsWith('tiktok_results_') && file.endsWith('.json')
+		)
+		.sort()
+
+	if (reportFiles.length === 0) return null
+
+	// Iterate through files starting from the latest
+	for (let i = reportFiles.length - 1; i >= 0; i--) {
+		const filePath = path.join(reportsFolder, reportFiles[i])
+		const report = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+
+		// Check if the report has a valid timestamp
+		if (report.timestamp) {
+			const timestamp = new Date(report.timestamp)
+			if (!isNaN(timestamp)) {
+				// Valid timestamp
+				report.timestamp = timestamp
+				return report
+			}
+		}
+	}
+
+	console.warn('No valid timestamp found in any report file.')
+	return null
+}
+
+// Main function
 ;(async () => {
 	const inputFilePath = 'tiktok_users.txt'
 	const configFilePath = 'config.json'
@@ -183,6 +241,16 @@ async function processInBatches(usernames, batchSize, task, logFilePath) {
 
 	console.log(`Starting TikTok scraping for ${usernames.length} users...`)
 
+	// Load the last report and calculate time difference
+	const lastReport = loadLastReport(reportsFolder)
+	const now = new Date()
+
+	let timeDifference = null
+	if (lastReport && lastReport.timestamp) {
+		console.log(`Last report generated: ${lastReport.timestamp}`)
+		timeDifference = calculateTimeDifference(now, lastReport.timestamp)
+	}
+
 	// Clear the log file at the start of execution
 	fs.writeFileSync(logFilePath, '')
 
@@ -192,40 +260,34 @@ async function processInBatches(usernames, batchSize, task, logFilePath) {
 		(username, logPath) => scrapeTikTokProfile(username, retries, logPath)
 	)
 
-	const totalVideos = results.reduce(
-		(sum, user) => sum + (user.totalVideos || 0),
-		0
-	)
-	const totalFollowers = results.reduce(
-		(sum, user) => sum + (user.followers || 0),
-		0
-	)
-	const totalLikes = results.reduce((sum, user) => sum + (user.likes || 0), 0)
-	const totalViews = results.reduce(
-		(sum, user) => sum + (user.totalViews || 0),
-		0
-	)
+	const totals = {
+		totalUsers: usernames.length,
+		totalVideos: results.reduce((sum, user) => sum + (user.totalVideos || 0), 0),
+		totalFollowers: results.reduce((sum, user) => sum + (user.followers || 0), 0),
+		totalLikes: results.reduce((sum, user) => sum + (user.likes || 0), 0),
+		totalViews: results.reduce((sum, user) => sum + (user.totalViews || 0), 0),
+	}
+
+	let differences = null
+	if (lastReport) {
+		differences = calculateDifferences(totals, lastReport.totals)
+	}
 
 	const topUsersByFollowers = getTopUsers(results, 'followers', rankLimit)
 	const topUsersByViews = getTopUsers(results, 'totalViews', rankLimit)
 	const topUsersByLikes = getTopUsers(results, 'likes', rankLimit)
 
-	const now = new Date()
 	const timestamp = now.toISOString().replace(/[:.]/g, '-')
 	const outputFilePath = path.join(
 		reportsFolder,
 		`tiktok_results_${timestamp}.json`
 	)
 
+	// Include the timestamp in the output data
 	const outputData = {
+		timestamp: now.toISOString(), // Save the timestamp
 		results,
-		totals: {
-			totalUsers: usernames.length,
-			totalVideos,
-			totalFollowers,
-			totalLikes,
-			totalViews,
-		},
+		totals,
 		highest: {
 			topUsersByFollowers,
 			topUsersByViews,
@@ -238,12 +300,39 @@ async function processInBatches(usernames, batchSize, task, logFilePath) {
 
 	// Print summary
 	console.log('\n--- TikTok Takeover Stats ---')
-	console.log(`Total Users: ${usernames.length}`)
-	console.log(`Total Videos: ${totalVideos}`)
-	console.log(`Total Followers: ${formatNumber(totalFollowers)}`)
-	console.log(`Total Likes: ${formatNumber(totalLikes)}`)
-	console.log(`Total Views: ${formatNumber(totalViews)}`)
+
+	console.log(
+		`Total Users: ${totals.totalUsers} (${
+			differences?.totalUsers >= 0 ? '+' : ''
+		}${differences?.totalUsers || 0})`
+	)
+	console.log(
+		`Total Videos: ${totals.totalVideos} (${
+			differences?.totalVideos >= 0 ? '+' : ''
+		}${differences?.totalVideos || 0})`
+	)
+	console.log(
+		`Total Followers: ${formatNumber(totals.totalFollowers)} (${
+			differences?.totalFollowers >= 0 ? '+' : ''
+		}${formatNumber(differences?.totalFollowers || 0)})`
+	)
+	console.log(
+		`Total Likes: ${formatNumber(totals.totalLikes)} (${
+			differences?.totalLikes >= 0 ? '+' : ''
+		}${formatNumber(differences?.totalLikes || 0)})`
+	)
+	console.log(
+		`Total Views: ${formatNumber(totals.totalViews)} (${
+			differences?.totalViews >= 0 ? '+' : ''
+		}${formatNumber(differences?.totalViews || 0)})`
+	)
 	console.log(`\nTop ${rankLimit} Users by Followers:\n${topUsersByFollowers}`)
 	console.log(`\nTop ${rankLimit} Users by Views:\n${topUsersByViews}`)
 	console.log(`\nTop ${rankLimit} Users by Likes:\n${topUsersByLikes}`)
+
+	if (timeDifference) {
+		console.log(`\nLast report generated: ${timeDifference}`)
+	} else {
+		console.log('\nThis is the first report generated.')
+	}
 })()
