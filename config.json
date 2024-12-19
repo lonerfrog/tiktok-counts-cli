@@ -1,4 +1,5 @@
 {
-	"retries": 3,
-	"rankLimit": 5
+	"retries": 5,
+	"rankLimit": 5,
+	"batchSize": 5
 }

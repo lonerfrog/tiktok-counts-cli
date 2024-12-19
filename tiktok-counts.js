@@ -11,10 +11,10 @@ puppeteer.use(StealthPlugin())
 function loadConfig(configPath) {
 	try {
 		const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
-		return config
+		return { ...config, batchSize: config.batchSize || 5 }
 	} catch (error) {
 		console.error(`Error loading config file: ${error.message}`)
-		return { retries: 3, rankLimit: 5 }
+		return { retries: 3, rankLimit: 5, batchSize: 5 }
 	}
 }
 
@@ -53,15 +53,13 @@ function getTopUsers(results, metric, count = 5) {
 		.slice(0, count)
 		.map(
 			(user, index) =>
-				`${index + 1}. ${user.username} - ${formatNumber(
-					user[metric] || 0
-				)} ${metric}`
+				`${index + 1}. @${user.username} - ${formatNumber(user[metric] || 0)}`
 		)
 		.join('\n')
 }
 
 // Scrape TikTok profile data
-async function scrapeTikTokProfile(username, retries, progressBar) {
+async function scrapeTikTokProfile(username, retries, logFilePath) {
 	const url = `https://www.tiktok.com/@${username}`
 	const browser = await puppeteer.launch({
 		headless: true,
@@ -79,9 +77,6 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 	while (attempts < retries) {
 		attempts++
 		try {
-			progressBar.update({ username: `@${username}` })
-
-			// Navigate to the user's profile
 			await page.goto(url, { waitUntil: 'networkidle2', timeout: 90000 })
 			await page.waitForSelector('[data-e2e="followers-count"]', {
 				timeout: 20000,
@@ -126,12 +121,10 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 			})
 
 			if (data.videos.length > 0) break // Exit loop if videos are found
-			console.log(
-				`Retrying @${username}, videos list is empty (Attempt ${attempts}/${retries})`
-			)
 		} catch (error) {
-			console.log(
-				`Error scraping @${username}, retrying (Attempt ${attempts}/${retries})`
+			fs.appendFileSync(
+				logFilePath,
+				`Retrying @${username}, attempt ${attempts}\n`
 			)
 		}
 	}
@@ -145,19 +138,42 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 	return { username, ...data }
 }
 
-// Ensure reports folder exists
-function ensureReportsFolder() {
-	const reportsPath = path.join(__dirname, 'reports')
-	if (!fs.existsSync(reportsPath)) fs.mkdirSync(reportsPath)
-	return reportsPath
+// Process users in batches to control concurrency
+async function processInBatches(usernames, batchSize, task, logFilePath) {
+	const results = []
+	const progressBar = new cliProgress.SingleBar(
+		{
+			format:
+				'Progress [{bar}] {percentage}% | {value}/{total} Users | Current User: {username}',
+			clearOnComplete: true, // Clears the progress bar after completion
+		},
+		cliProgress.Presets.shades_classic
+	)
+	progressBar.start(usernames.length, 0, { username: '' })
+
+	for (let i = 0; i < usernames.length; i += batchSize) {
+		const batch = usernames.slice(i, i + batchSize).map((username) =>
+			task(username, logFilePath).then((result) => {
+				progressBar.increment(1, { username: `@${username}` })
+				return result
+			})
+		)
+		results.push(...(await Promise.all(batch)))
+	}
+
+	progressBar.stop()
+	return results
 }
 
-// Main function
 ;(async () => {
 	const inputFilePath = 'tiktok_users.txt'
 	const configFilePath = 'config.json'
+	const reportsFolder = path.join(__dirname, 'reports')
+	const logFilePath = path.join(reportsFolder, 'retry_log.txt')
 
-	const { retries, rankLimit } = loadConfig(configFilePath)
+	if (!fs.existsSync(reportsFolder)) fs.mkdirSync(reportsFolder)
+
+	const { retries, rankLimit, batchSize } = loadConfig(configFilePath)
 	const usernames = readUsernamesFromFile(inputFilePath)
 
 	if (usernames.length === 0) {
@@ -167,23 +183,14 @@ function ensureReportsFolder() {
 
 	console.log(`Starting TikTok scraping for ${usernames.length} users...`)
 
-	const progressBar = new cliProgress.SingleBar(
-		{
-			format:
-				'Progress [{bar}] {percentage}% | {value}/{total} Users | Current User: {username}',
-		},
-		cliProgress.Presets.shades_classic
+	// Clear the log file at the start of execution
+	fs.writeFileSync(logFilePath, '')
+
+	const results = await processInBatches(
+		usernames,
+		batchSize,
+		(username, logPath) => scrapeTikTokProfile(username, retries, logPath)
 	)
-	progressBar.start(usernames.length, 0, { username: '' })
-
-	const results = []
-	for (const username of usernames) {
-		const data = await scrapeTikTokProfile(username, retries, progressBar)
-		results.push(data)
-		progressBar.increment()
-	}
-
-	progressBar.stop()
 
 	const totalVideos = results.reduce(
 		(sum, user) => sum + (user.totalVideos || 0),
@@ -200,10 +207,9 @@ function ensureReportsFolder() {
 	)
 
 	const topUsersByFollowers = getTopUsers(results, 'followers', rankLimit)
-	const topUsersByViews = getTopUsers(results, 'total views', rankLimit)
+	const topUsersByViews = getTopUsers(results, 'totalViews', rankLimit)
 	const topUsersByLikes = getTopUsers(results, 'likes', rankLimit)
 
-	const reportsFolder = ensureReportsFolder()
 	const now = new Date()
 	const timestamp = now.toISOString().replace(/[:.]/g, '-')
 	const outputFilePath = path.join(
@@ -228,18 +234,16 @@ function ensureReportsFolder() {
 	}
 
 	fs.writeFileSync(outputFilePath, JSON.stringify(outputData, null, 2))
-	console.log(`Results saved to ${outputFilePath}`)
+	console.log(`\nResults saved to ${outputFilePath}`)
 
 	// Print summary
-	setTimeout(() => {
-		console.log('\n--- TikTok Takeover Stats ---')
-		console.log(`Total Users: ${usernames.length}`)
-		console.log(`Total Videos: ${totalVideos}`)
-		console.log(`Total Followers: ${formatNumber(totalFollowers)}`)
-		console.log(`Total Likes: ${formatNumber(totalLikes)}`)
-		console.log(`Total Views: ${formatNumber(totalViews)}`)
-		console.log(`\nTop ${rankLimit} Users by Followers:\n${topUsersByFollowers}`)
-		console.log(`\nTop ${rankLimit} Users by Views:\n${topUsersByViews}`)
-		console.log(`\nTop ${rankLimit} Users by Likes:\n${topUsersByLikes}`)
-	}, 5000)
+	console.log('\n--- TikTok Takeover Stats ---')
+	console.log(`Total Users: ${usernames.length}`)
+	console.log(`Total Videos: ${totalVideos}`)
+	console.log(`Total Followers: ${formatNumber(totalFollowers)}`)
+	console.log(`Total Likes: ${formatNumber(totalLikes)}`)
+	console.log(`Total Views: ${formatNumber(totalViews)}`)
+	console.log(`\nTop ${rankLimit} Users by Followers:\n${topUsersByFollowers}`)
+	console.log(`\nTop ${rankLimit} Users by Views:\n${topUsersByViews}`)
+	console.log(`\nTop ${rankLimit} Users by Likes:\n${topUsersByLikes}`)
 })()

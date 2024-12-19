@@ -11,10 +11,10 @@ puppeteer.use(StealthPlugin())
 function loadConfig(configPath) {
 	try {
 		const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
-		return config
+		return { ...config, concurrency: config.concurrency || 5 }
 	} catch (error) {
 		console.error(`Error loading config file: ${error.message}`)
-		return { retries: 3, rankLimit: 3 }
+		return { retries: 3, rankLimit: 5, concurrency: 5 }
 	}
 }
 
@@ -38,49 +38,56 @@ function readUsernamesFromFile(filePath) {
 	}
 }
 
-// Load previous results for comparison
-function loadPreviousResults(reportsFolder) {
-	const files = fs
-		.readdirSync(reportsFolder)
-		.filter(
-			(file) => file.startsWith('tiktok_results_') && file.endsWith('.json')
+// Helper to format large numbers into shorthand (e.g., 4.3M, 323K)
+function formatNumber(value) {
+	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+	if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
+	return value.toString()
+}
+
+// Helper to get top N users based on a metric
+function getTopUsers(results, metric, count = 5) {
+	return results
+		.filter((user) => !user.error)
+		.sort((a, b) => (b[metric] || 0) - (a[metric] || 0))
+		.slice(0, count)
+		.map(
+			(user, index) =>
+				`${index + 1}. @${user.username} - ${formatNumber(
+					user[metric] || 0
+				)} ${metric}`
 		)
-		.sort()
-	if (files.length === 0) return null
-
-	const lastFile = files[files.length - 1]
-	const lastFilePath = path.join(reportsFolder, lastFile)
-	console.log(`Comparing data with previous results: ${lastFile}`)
-	return JSON.parse(fs.readFileSync(lastFilePath, 'utf-8'))
+		.join('\n')
 }
 
-// Calculate differences between current and previous totals or rankings
-function calculateDifferences(current, previous) {
-	const differences = {}
-	for (const key in current) {
-		differences[key] = current[key] - (previous[key] || 0)
+// Process users in batches to control concurrency
+async function processInBatches(usernames, batchSize, task) {
+	const results = []
+	const progressBar = new cliProgress.SingleBar(
+		{
+			format:
+				'Progress [{bar}] {percentage}% | {value}/{total} Users | Current User: {username}',
+		},
+		cliProgress.Presets.shades_classic
+	)
+	progressBar.start(usernames.length, 0, { username: '' })
+
+	for (let i = 0; i < usernames.length; i += batchSize) {
+		const batch = usernames.slice(i, i + batchSize).map((username) =>
+			task(username).then((result) => {
+				progressBar.increment(1, { username: `@${username}` })
+				return result
+			})
+		)
+		results.push(...(await Promise.all(batch)))
 	}
-	return differences
-}
 
-// Compare top users with previous top users
-function compareTopUsers(currentTop, previousTop) {
-	// Ensure previousTop is an array, otherwise default to an empty array
-	previousTop = Array.isArray(previousTop) ? previousTop : []
-
-	return currentTop.map((user) => {
-		// Find matching user in previousTop or default to an empty value
-		const prevUser = previousTop.find((u) => u.username === user.username) || {
-			value: 0,
-		}
-		const diff = user.value - (prevUser.value || 0)
-
-		return { alias: `@${user.username}`, value: user.value, diff }
-	})
+	progressBar.stop()
+	return results
 }
 
 // Scrape TikTok profile data
-async function scrapeTikTokProfile(username, retries, progressBar) {
+async function scrapeTikTokProfile(username, retries) {
 	const url = `https://www.tiktok.com/@${username}`
 	const browser = await puppeteer.launch({
 		headless: true,
@@ -92,9 +99,10 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 		'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
 	)
 
-	for (let i = 0; i < retries; i++) {
+	let attempts = 0
+	while (attempts < retries) {
+		attempts++
 		try {
-			progressBar.update({ username: `@${username}` })
 			await page.goto(url, { waitUntil: 'networkidle2', timeout: 90000 })
 			await page.waitForSelector('[data-e2e="followers-count"]', {
 				timeout: 20000,
@@ -118,6 +126,7 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 
 				const videos = []
 				let totalViews = 0
+
 				document
 					.querySelectorAll('div[data-e2e="user-post-item"]')
 					.forEach((video) => {
@@ -125,6 +134,7 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 							video.querySelector('strong[data-e2e="video-views"]')?.textContent || '0'
 						const views = parseShorthand(viewsText)
 						const link = video.querySelector('a')?.href || 'N/A'
+
 						videos.push({ views, link })
 						totalViews += views
 					})
@@ -141,21 +151,12 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 			await browser.close()
 			return { username, ...data }
 		} catch (error) {
-			console.log(`Retrying @${username}, attempt ${i + 1}`)
+			console.log(`Retrying @${username}, attempt ${attempts}/${retries}`)
 		}
 	}
 
 	await browser.close()
 	return { username, error: 'Failed after retries' }
-}
-
-// Helper to get top N users based on a metric
-function getTopUsers(results, metric, count = 3) {
-	return results
-		.filter((user) => !user.error)
-		.sort((a, b) => (b[metric] || 0) - (a[metric] || 0))
-		.slice(0, count)
-		.map((user) => ({ username: user.username, value: user[metric], metric }))
 }
 
 ;(async () => {
@@ -165,26 +166,19 @@ function getTopUsers(results, metric, count = 3) {
 
 	if (!fs.existsSync(reportsFolder)) fs.mkdirSync(reportsFolder)
 
-	const { retries, rankLimit } = loadConfig(configFilePath)
+	const { retries, rankLimit, concurrency } = loadConfig(configFilePath)
 	const usernames = readUsernamesFromFile(inputFilePath)
-	const previousResults = loadPreviousResults(reportsFolder)
 
-	const progressBar = new cliProgress.SingleBar(
-		{
-			format:
-				'Progress [{bar}] {percentage}% | {value}/{total} Users | Current User: {username}',
-		},
-		cliProgress.Presets.shades_classic
-	)
-	progressBar.start(usernames.length, 0, { username: '' })
-
-	const results = []
-	for (const username of usernames) {
-		const data = await scrapeTikTokProfile(username, retries, progressBar)
-		results.push(data)
-		progressBar.increment()
+	if (usernames.length === 0) {
+		console.error('No usernames found. Exiting...')
+		process.exit(1)
 	}
-	progressBar.stop()
+
+	console.log(`Starting TikTok scraping for ${usernames.length} users...`)
+
+	const results = await processInBatches(usernames, concurrency, (username) =>
+		scrapeTikTokProfile(username, retries)
+	)
 
 	const totals = {
 		totalUsers: results.length,
@@ -197,10 +191,6 @@ function getTopUsers(results, metric, count = 3) {
 	const topFollowers = getTopUsers(results, 'followers', rankLimit)
 	const topViews = getTopUsers(results, 'totalViews', rankLimit)
 	const topLikes = getTopUsers(results, 'likes', rankLimit)
-
-	const differences = previousResults
-		? calculateDifferences(totals, previousResults.totals)
-		: null
 
 	const now = new Date()
 	const timestamp = now.toISOString().replace(/[:.]/g, '-')
@@ -226,23 +216,12 @@ function getTopUsers(results, metric, count = 3) {
 	)
 
 	console.log('\n--- Summary ---')
-	for (const [key, value] of Object.entries(totals)) {
-		const diff = differences
-			? ` (${differences[key] >= 0 ? '+' : ''}${differences[key]})`
-			: ''
-		console.log(`${key.replace(/([A-Z])/g, ' $1')}: ${value}${diff}`)
-	}
-
-	if (previousResults && previousResults.topFollowers) {
-		console.log('\n--- Top Users Comparisons ---')
-
-		console.log('\nTop 3 Users by Followers:')
-		console.table(compareTopUsers(topFollowers, previousResults.topFollowers))
-
-		console.log('\nTop 3 Users by Views:')
-		console.table(compareTopUsers(topViews, previousResults.topViews))
-
-		console.log('\nTop 3 Users by Likes:')
-		console.table(compareTopUsers(topLikes, previousResults.topLikes))
-	}
+	console.log(`Total Users: ${totals.totalUsers}`)
+	console.log(`Total Videos: ${totals.totalVideos}`)
+	console.log(`Total Followers: ${formatNumber(totals.totalFollowers)}`)
+	console.log(`Total Likes: ${formatNumber(totals.totalLikes)}`)
+	console.log(`Total Views: ${formatNumber(totals.totalViews)}`)
+	console.log(`\nTop ${rankLimit} Users by Followers:\n${topFollowers}`)
+	console.log(`\nTop ${rankLimit} Users by Views:\n${topViews}`)
+	console.log(`\nTop ${rankLimit} Users by Likes:\n${topLikes}`)
 })()
