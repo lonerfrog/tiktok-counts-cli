@@ -14,7 +14,7 @@ function loadConfig(configPath) {
 		return config
 	} catch (error) {
 		console.error(`Error loading config file: ${error.message}`)
-		return { retries: 3 }
+		return { retries: 3, rankLimit: 5 }
 	}
 }
 
@@ -22,7 +22,6 @@ function loadConfig(configPath) {
 function readUsernamesFromFile(filePath) {
 	try {
 		const data = fs.readFileSync(filePath, 'utf-8')
-		// Split lines, trim spaces, filter blanks, and remove duplicates using a Set
 		const usernames = Array.from(
 			new Set(
 				data
@@ -31,7 +30,6 @@ function readUsernamesFromFile(filePath) {
 					.filter(Boolean)
 			)
 		)
-
 		console.log(`Loaded ${usernames.length} unique usernames.`)
 		return usernames
 	} catch (error) {
@@ -40,38 +38,26 @@ function readUsernamesFromFile(filePath) {
 	}
 }
 
-// Check if TikTok user exists
-async function checkUserExists(page, username) {
-	try {
-		const url = `https://www.tiktok.com/@${username}`
-		await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 })
-		const notFound = await page.$("div[data-e2e='user-not-found']")
-		return !notFound
-	} catch (error) {
-		return false
-	}
+// Format large numbers into shorthand (e.g., 4.3M, 323K)
+function formatNumber(value) {
+	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+	if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
+	return value.toString()
 }
 
-// Helper to get top N users based on a metric
-function getTopUsers(results, metric, rankLimit) {
+// Get the top N users based on a specific metric
+function getTopUsers(results, metric, count = 5) {
 	return results
 		.filter((user) => !user.error)
 		.sort((a, b) => (b[metric] || 0) - (a[metric] || 0))
-		.slice(0, rankLimit)
-		.map((user) => ({ username: user.username, [metric]: user[metric] }))
-}
-
-// Convert TikTok shorthand like "13K", "12.3K", or "1.5M" to an integer
-function parseShorthandNumber(value) {
-	if (!value) return 0
-
-	const multiplier = value.includes('K')
-		? 1000
-		: value.includes('M')
-		? 1000000
-		: 1
-
-	return parseFloat(value.replace(/[KM]/, '').replace(/,/g, '')) * multiplier
+		.slice(0, count)
+		.map(
+			(user, index) =>
+				`${index + 1}. ${user.username} - ${formatNumber(
+					user[metric] || 0
+				)} ${metric}`
+		)
+		.join('\n')
 }
 
 // Scrape TikTok profile data
@@ -87,17 +73,13 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 		'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
 	)
 
-	for (let i = 0; i < retries; i++) {
+	let attempts = 0
+	let data = null
+
+	while (attempts < retries) {
+		attempts++
 		try {
 			progressBar.update({ username: `@${username}` })
-
-			// Check if the user exists
-			const exists = await checkUserExists(page, username)
-			if (!exists) {
-				console.log(`User @${username} does not exist.`)
-				await browser.close()
-				return { username, error: 'User not found' }
-			}
 
 			// Navigate to the user's profile
 			await page.goto(url, { waitUntil: 'networkidle2', timeout: 90000 })
@@ -106,8 +88,7 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 			})
 
 			// Extract data
-			const data = await page.evaluate((parseShorthandNumber) => {
-				// Helper to parse shorthand numbers
+			data = await page.evaluate(() => {
 				function parseShorthand(value) {
 					if (!value) return 0
 					const multiplier = value.includes('K')
@@ -118,7 +99,6 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 					return parseFloat(value.replace(/[KM]/, '').replace(/,/g, '')) * multiplier
 				}
 
-				// Followers and likes
 				const followersText =
 					document.querySelector('[data-e2e="followers-count"]')?.textContent || '0'
 				const likesText =
@@ -127,9 +107,9 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 				const followers = parseShorthand(followersText)
 				const likes = parseShorthand(likesText)
 
-				// Extract videos and views
 				const videos = []
 				let totalViews = 0
+
 				document
 					.querySelectorAll('div[data-e2e="user-post-item"]')
 					.forEach((video) => {
@@ -143,17 +123,26 @@ async function scrapeTikTokProfile(username, retries, progressBar) {
 					})
 
 				return { followers, likes, totalViews, totalVideos: videos.length, videos }
-			}, parseShorthandNumber.toString())
+			})
 
-			await browser.close()
-			return { username, ...data }
+			if (data.videos.length > 0) break // Exit loop if videos are found
+			console.log(
+				`Retrying @${username}, videos list is empty (Attempt ${attempts}/${retries})`
+			)
 		} catch (error) {
-			console.log(`Retrying @${username}, attempt ${i + 1}`)
+			console.log(
+				`Error scraping @${username}, retrying (Attempt ${attempts}/${retries})`
+			)
 		}
 	}
 
 	await browser.close()
-	return { username, error: 'Failed after retries' }
+
+	if (!data || data.videos.length === 0) {
+		return { username, error: 'Failed to fetch non-empty videos after retries' }
+	}
+
+	return { username, ...data }
 }
 
 // Ensure reports folder exists
@@ -161,15 +150,6 @@ function ensureReportsFolder() {
 	const reportsPath = path.join(__dirname, 'reports')
 	if (!fs.existsSync(reportsPath)) fs.mkdirSync(reportsPath)
 	return reportsPath
-}
-
-// Helper to get top N users based on a metric
-function getTopUsers(results, metric, count = 5) {
-	return results
-		.filter((user) => !user.error)
-		.sort((a, b) => (b[metric] || 0) - (a[metric] || 0))
-		.slice(0, count)
-		.map((user) => ({ username: user.username, [metric]: user[metric] }))
 }
 
 // Main function
@@ -220,12 +200,8 @@ function getTopUsers(results, metric, count = 5) {
 	)
 
 	const topUsersByFollowers = getTopUsers(results, 'followers', rankLimit)
-	const topUsersByViews = getTopUsers(results, 'totalViews', rankLimit)
+	const topUsersByViews = getTopUsers(results, 'total views', rankLimit)
 	const topUsersByLikes = getTopUsers(results, 'likes', rankLimit)
-
-	const videoWithMostViews = results
-		.flatMap((user) => user.videos || [])
-		.reduce((max, video) => (video.views > max.views ? video : max), { views: 0 })
 
 	const reportsFolder = ensureReportsFolder()
 	const now = new Date()
@@ -248,7 +224,6 @@ function getTopUsers(results, metric, count = 5) {
 			topUsersByFollowers,
 			topUsersByViews,
 			topUsersByLikes,
-			videoWithMostViews,
 		},
 	}
 
@@ -256,29 +231,15 @@ function getTopUsers(results, metric, count = 5) {
 	console.log(`Results saved to ${outputFilePath}`)
 
 	// Print summary
-	console.log('\n--- TikTok Takeover Stats ---')
-	console.log(`Total Users: ${usernames.length}`)
-	console.log(`Total Videos: ${totalVideos}`)
-	console.log(`Total Followers: ${totalFollowers}`)
-	console.log(`Total Likes: ${totalLikes}`)
-	console.log(`Total Views: ${totalViews}`)
-
-	console.log(`\nTop ${rankLimit} Users by Followers:`)
-	topUsersByFollowers.forEach((user, i) =>
-		console.log(`${i + 1}. ${user.username} - ${user.followers} followers`)
-	)
-
-	console.log(`\nTop ${rankLimit} Users by Views:`)
-	topUsersByViews.forEach((user, i) =>
-		console.log(`${i + 1}. ${user.username} - ${user.totalViews} views`)
-	)
-
-	console.log(`\nTop ${rankLimit} Users by Likes:`)
-	topUsersByLikes.forEach((user, i) =>
-		console.log(`${i + 1}. ${user.username} - ${user.likes} likes`)
-	)
-
-	console.log(
-		`\nVideo with Most Views: ${videoWithMostViews.link} (${videoWithMostViews.views} views)`
-	)
+	setTimeout(() => {
+		console.log('\n--- TikTok Takeover Stats ---')
+		console.log(`Total Users: ${usernames.length}`)
+		console.log(`Total Videos: ${totalVideos}`)
+		console.log(`Total Followers: ${formatNumber(totalFollowers)}`)
+		console.log(`Total Likes: ${formatNumber(totalLikes)}`)
+		console.log(`Total Views: ${formatNumber(totalViews)}`)
+		console.log(`\nTop ${rankLimit} Users by Followers:\n${topUsersByFollowers}`)
+		console.log(`\nTop ${rankLimit} Users by Views:\n${topUsersByViews}`)
+		console.log(`\nTop ${rankLimit} Users by Likes:\n${topUsersByLikes}`)
+	}, 5000)
 })()
