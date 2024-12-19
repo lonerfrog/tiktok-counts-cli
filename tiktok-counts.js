@@ -224,7 +224,7 @@ function loadLastReport(reportsFolder) {
 
 // Main function
 ;(async () => {
-	const inputFilePath = 'tiktok_users.txt'
+	const inputFilePath = 'users/tiktok_users.txt'
 	const configFilePath = 'config.json'
 	const reportsFolder = path.join(__dirname, 'reports')
 	const logFilePath = path.join(reportsFolder, 'retry_log.txt')
