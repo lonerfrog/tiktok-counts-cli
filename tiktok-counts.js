@@ -42,6 +42,14 @@ async function scrapeTikTokProfile(username, retries, logFilePath) {
 		attempts++
 		try {
 			await page.goto(url, { waitUntil: 'networkidle2', timeout: 90000 })
+			const userExists = await page.evaluate(() => {
+				return !document.querySelector('div[data-e2e="error-page"]')
+			})
+
+			if (!userExists) {
+				throw new Error(`User @${username} does not exist or is unavailable.`)
+			}
+
 			await page.waitForSelector('[data-e2e="followers-count"]', {
 				timeout: 20000,
 			})
@@ -86,9 +94,14 @@ async function scrapeTikTokProfile(username, retries, logFilePath) {
 
 			if (data.videos.length > 0) break // Exit loop if videos are found
 		} catch (error) {
+			if (error.message.includes('Timeout')) {
+				console.error(`Timeout exceeded for @${username}. Moving to next user.`)
+				break
+			}
 			fs.appendFileSync(
 				logFilePath,
-				`Retrying @${username}, attempt ${attempts}\n`
+				`Retrying @${username}, attempt ${attempts} - Error: ${error.message}
+`
 			)
 		}
 	}
@@ -202,16 +215,13 @@ function loadLastReport(reportsFolder) {
 
 	if (reportFiles.length === 0) return null
 
-	// Iterate through files starting from the latest
 	for (let i = reportFiles.length - 1; i >= 0; i--) {
 		const filePath = path.join(reportsFolder, reportFiles[i])
 		const report = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
 
-		// Check if the report has a valid timestamp
 		if (report.timestamp) {
 			const timestamp = new Date(report.timestamp)
 			if (!isNaN(timestamp)) {
-				// Valid timestamp
 				report.timestamp = timestamp
 				return report
 			}
@@ -220,6 +230,40 @@ function loadLastReport(reportsFolder) {
 
 	console.warn('No valid timestamp found in any report file.')
 	return null
+}
+
+async function validateVideoCounts(results, lastReport, logFilePath) {
+	const videoBufferCount = 5
+
+	if (!lastReport) return results
+
+	const previousResults = lastReport.results.reduce((map, user) => {
+		map[user.username] = user.totalVideos
+		return map
+	}, {})
+
+	for (const user of results) {
+		if (!user.error && previousResults[user.username] !== undefined) {
+			const previousVideos = previousResults[user.username]
+			if (user.totalVideos + videoBufferCount < previousVideos) {
+				console.warn(
+					`Warning: @${user.username} has fewer videos (${user.totalVideos}) than previously reported (${previousVideos}). Retrying...`
+				)
+
+				const retryResult = await scrapeTikTokProfile(user.username, 1, logFilePath)
+				if (!retryResult.error && retryResult.totalVideos >= previousVideos) {
+					Object.assign(user, retryResult)
+					console.log(
+						`@${user.username} updated with new video count: ${user.totalVideos}`
+					)
+				} else {
+					console.warn(`@${user.username} video count could not be corrected.`)
+				}
+			}
+		}
+	}
+
+	return results
 }
 
 // Main function
@@ -260,12 +304,30 @@ function loadLastReport(reportsFolder) {
 		(username, logPath) => scrapeTikTokProfile(username, retries, logPath)
 	)
 
+	const validatedResults = await validateVideoCounts(
+		results,
+		lastReport,
+		logFilePath
+	)
+
 	const totals = {
 		totalUsers: usernames.length,
-		totalVideos: results.reduce((sum, user) => sum + (user.totalVideos || 0), 0),
-		totalFollowers: results.reduce((sum, user) => sum + (user.followers || 0), 0),
-		totalLikes: results.reduce((sum, user) => sum + (user.likes || 0), 0),
-		totalViews: results.reduce((sum, user) => sum + (user.totalViews || 0), 0),
+		totalVideos: validatedResults.reduce(
+			(sum, user) => sum + (user.totalVideos || 0),
+			0
+		),
+		totalFollowers: validatedResults.reduce(
+			(sum, user) => sum + (user.followers || 0),
+			0
+		),
+		totalLikes: validatedResults.reduce(
+			(sum, user) => sum + (user.likes || 0),
+			0
+		),
+		totalViews: validatedResults.reduce(
+			(sum, user) => sum + (user.totalViews || 0),
+			0
+		),
 	}
 
 	let differences = null
@@ -286,7 +348,7 @@ function loadLastReport(reportsFolder) {
 	// Include the timestamp in the output data
 	const outputData = {
 		timestamp: now.toISOString(), // Save the timestamp
-		results,
+		results: validatedResults,
 		totals,
 		highest: {
 			topUsersByFollowers,
