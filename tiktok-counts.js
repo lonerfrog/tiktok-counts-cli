@@ -23,7 +23,7 @@ function calculateTimeDifference(current, previous) {
 }
 
 // Scrape TikTok profile data
-async function scrapeTikTokProfile(username, retries, logFilePath) {
+async function scrapeTikTokProfile(username, retries) {
 	const url = `https://www.tiktok.com/@${username}`
 	const browser = await puppeteer.launch({
 		headless: true,
@@ -98,11 +98,7 @@ async function scrapeTikTokProfile(username, retries, logFilePath) {
 				console.error(`Timeout exceeded for @${username}. Moving to next user.`)
 				break
 			}
-			fs.appendFileSync(
-				logFilePath,
-				`Retrying @${username}, attempt ${attempts} - Error: ${error.message}
-`
-			)
+			console.error(`Error fetching @${username}: ${error.message}`)
 		}
 	}
 
@@ -250,7 +246,7 @@ async function validateVideoCounts(results, lastReport, logFilePath) {
 					`Warning: @${user.username} has fewer videos (${user.totalVideos}) than previously reported (${previousVideos}). Retrying...`
 				)
 
-				const retryResult = await scrapeTikTokProfile(user.username, 1, logFilePath)
+				const retryResult = await scrapeTikTokProfile(user.username, 1)
 				if (!retryResult.error && retryResult.totalVideos >= previousVideos) {
 					Object.assign(user, retryResult)
 					console.log(
