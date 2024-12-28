@@ -229,7 +229,7 @@ function loadLastReport(reportsFolder) {
 }
 
 async function validateVideoCounts(results, lastReport, logFilePath) {
-	const videoBufferCount = 5
+	const videoBufferCount = 2
 	const retryCount = 3
 
 	if (!lastReport) return results
@@ -242,12 +242,13 @@ async function validateVideoCounts(results, lastReport, logFilePath) {
 	for (const user of results) {
 		if (!user.error && previousResults[user.username] !== undefined) {
 			const previousVideos = previousResults[user.username]
-			if (user.totalVideos + videoBufferCount < previousVideos) {
+			const currentVideosCount = user.totalVideos + videoBufferCount
+			if (currentVideosCount < previousVideos) {
 				console.warn(
 					`Warning: @${user.username} has fewer videos (${user.totalVideos}) than previously reported (${previousVideos}). Retrying...`
 				)
 
-				while (user.totalVideos + videoBufferCount < previousVideos) {
+				while (currentVideosCount < previousVideos) {
 					const retryResult = await scrapeTikTokProfile(user.username, retryCount)
 					if (!retryResult.error && retryResult.totalVideos >= previousVideos) {
 						Object.assign(user, retryResult)
