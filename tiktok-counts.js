@@ -145,7 +145,7 @@ function loadConfig(configPath) {
 		return { ...config, batchSize: config.batchSize || 5 }
 	} catch (error) {
 		console.error(`Error loading config file: ${error.message}`)
-		return { retries: 3, rankLimit: 5, batchSize: 5 }
+		return { retries: 2, rankLimit: 5, batchSize: 5 }
 	}
 }
 
@@ -230,7 +230,7 @@ function loadLastReport(reportsFolder) {
 
 async function validateVideoCounts(results, lastReport, logFilePath) {
 	const videoBufferCount = 2
-	const retryCount = 3
+	const retryCount = 1
 
 	if (!lastReport) return results
 
@@ -248,7 +248,9 @@ async function validateVideoCounts(results, lastReport, logFilePath) {
 					`Warning: @${user.username} has fewer videos (${user.totalVideos}) than previously reported (${previousVideos}). Retrying...`
 				)
 
-				while (currentVideosCount < previousVideos) {
+				let retryCountdown = retryCount
+				while (currentVideosCount < previousVideos && retryCountdown > 0) {
+					retryCountdown--
 					const retryResult = await scrapeTikTokProfile(user.username, retryCount)
 					if (!retryResult.error && retryResult.totalVideos >= previousVideos) {
 						Object.assign(user, retryResult)
